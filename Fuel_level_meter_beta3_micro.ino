@@ -1,6 +1,6 @@
 #include <EEPROM.h>
-#define INIT_KEY 24   // Uniq key, to check is this already in EEPROM or not
-#define ADDRESS 0     // address in eprom to store structure;
+#define INIT_KEY 20   // Uniq key, to check is this already in EEPROM or not
+#define ADDRESS 0     // address in eprom to store structures;
 
 #include <SPI.h>
 #include <Wire.h>
@@ -17,70 +17,65 @@ Adafruit_SH1106G display = Adafruit_SH1106G(128, 64, &Wire, OLED_RESET);
 // font size: 1 - char 5*7, 2 - char 10*14
 
 // buttons
-//#define EB_DEB 30       // дебаунс кнопки, мс
-//#define EB_CLICK 60    // click timeout
 #include <EncButton2.h> // by AlexGyver, v.2.0.0
 #define BUTTONS 3
 EncButton2<EB_BTN> button[BUTTONS];    // array of buttons
 
-#define Relay1 2 // Fuel pump relay on digital pin
+#define Relay1 4 // Fuel pump relay on digital pin
 #define Vin1  A0 // Fuel level sensor 1, analog pin number
 #define Vin2  A1 // Fuel level sensor 2, analog pin number
+#define Vin3  A2 // 12v voltage input
 
 // Number of samples taken from analog pins
 #define NUM_SAMPLES 10
 
-uint32_t timer1;    // main loop timer
+uint32_t timer1 = 0;    // main loop timer
 unsigned int pos;  // counter
 unsigned int raw0[NUM_SAMPLES];   // array for raw analog samples from input 1
 unsigned int raw1[NUM_SAMPLES];   // array for raw analog samples from input 2
 unsigned int sorted[NUM_SAMPLES]; // temporary array for sorting
 unsigned long Aver;  // Average raw value calculated from all samples in array
-
-#define VRef   5000  // Reference voltage in mV, 5v.
 int Summ ;           // Summary, liters
+
+// Voltage splitter for 12v imput sensor.
+#define VRef    5280 // Reference voltage in mV, 5v.
+#define Rlo     9750 //ohm  (10 kOhm) between analog pin and gnd
+#define Rhi    96000 //ohm (100 kOhm) between analog pin and voltage input
+unsigned long SysVol;  // System voltage
 
 struct FuelTankStruct {             // Variables calculated during work
   unsigned long V; // Voltage, mV
   int L;           // Volume, liter
   byte Perc;      // Percent of full load
 } ;
-FuelTankStruct tank[1];           // Use 2 fuel tanks.
+FuelTankStruct tank[2];           // Use 2 fuel tanks.
 
 struct FuelTankStoredStruct {       // Variables stored in EEPROM
   unsigned int  Vo[5]; // Voltage values for sensor, mV
   unsigned int  Li[5]; // Fuel tank values, liters
 } ;
-FuelTankStoredStruct tankVal[1];  // Use 2 fuel tanks.
+FuelTankStoredStruct tankVal[2];  // Use 2 fuel tanks.
 
 bool led = false;               // Make onboard led blink to see that main loop is working.
 
-const bool debug = false;              // debug on serial port
 const bool debug_osd = true;          // debug on OLED screen
 static bool relayState = false; // Relay state, to control fuel pump.
 
 void setup() {
-  if ( debug ) {
-    Serial.begin(9600);
-  }
-  delay(1500);                        // wait for the OLED to power up
-  if ( debug ) {
-    Serial.println("Start");
-  }
+  delay(1500);                        // For arduino leonardo, to allow serial usb up and connect
 
-  // voltage input
+  // voltage inputs
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(Vin1, INPUT);
   pinMode(Vin2, INPUT);
+  pinMode(Vin3, INPUT);
 
   // relay
   pinMode(Relay1, OUTPUT);
   digitalWrite(Relay1, LOW);
+  relayState = false;
 
   // button setup
-  if ( debug ) {
-    Serial.println("Button setup");
-  }
   button[0].setPins(INPUT_PULLUP, 7); // up (minus)
   button[1].setPins(INPUT_PULLUP, 9); // select
   button[2].setPins(INPUT_PULLUP, 8); // down (plus)
@@ -89,17 +84,11 @@ void setup() {
   // for (int i = 0; i < 1024; i++) { EEPROM.write(i,255);}  // force clear all eeprom
 
   // read structure from eeprom
-  if ( debug ) {
-    Serial.println("Read EEPROM");
-  }
   if (EEPROM.read(ADDRESS) != INIT_KEY) { // check key
-    if ( debug ) {
-      Serial.println("First time start, init EEPROM");
-    }
     EEPROM.write(ADDRESS, INIT_KEY);    // update key
     for (int t = 0; t < 2; t++) {
       for (int c = 0; c < 5; c++) {
-        tankVal[t].Vo[c] = c * 500;
+        tankVal[t].Vo[c] = 2500 - c * 500;
         tankVal[t].Li[c] = c * 10;
       }
     }
@@ -109,10 +98,7 @@ void setup() {
   EEPROM.get(ADDRESS + 1, tankVal[0]);
   EEPROM.get(ADDRESS + 21, tankVal[1]);
 
-  if ( debug ) {
-    Serial.println("Init OLED");
-  }
-  display.begin(i2c_Address, true); // Address 0x3C default
+  display.begin(i2c_Address, true);
   display.setRotation(3);
   display.display();
   delay(500);
@@ -121,26 +107,14 @@ void setup() {
   display.clearDisplay();
 
   // fill arrays with some default values
-  if ( debug ) {
-    Serial.println("Fill array with values");
-  }
   for (int c = 0; c < NUM_SAMPLES; c++) {
     raw0[c] = analogRead(Vin1);
     raw1[c] = analogRead(Vin2);
   }
 
-  relayState = false;
 }
 
 void loop() {
-
-  if ( debug ) {
-    Serial.print(millis());
-    Serial.print(" ,- timer1=");
-    Serial.print(timer1);
-    Serial.print(" , pos=");
-    Serial.println(pos);
-  }
 
   // once in 10 sec (10000 ms)
   if ( millis() - timer1 >= 1000) {
@@ -162,15 +136,13 @@ void loop() {
 
     // make led blink once in 10 second
     led = !led;
-    if ( led ) {
-      digitalWrite(LED_BUILTIN, HIGH);
-    } else {
-      digitalWrite(LED_BUILTIN, LOW);
-    }
+    if ( led ) { digitalWrite(LED_BUILTIN, HIGH);
+    } else {     digitalWrite(LED_BUILTIN, LOW); }
 
     // get voltage from pins, store in arrays
     raw0[pos] = analogRead(Vin1);
     raw1[pos] = analogRead(Vin2);
+    SysVol    = analogRead(Vin3);
 
     // calculate median value based on last 10 readings
     memcpy(sorted, raw0, sizeof(raw0[0])*NUM_SAMPLES );        // Copy to sorted array
@@ -182,19 +154,6 @@ void loop() {
     qsort(sorted, NUM_SAMPLES, sizeof(sorted[0]), ArrayCompare);
     Aver = (sorted[4] + sorted[5]) / 2;
     tank[1].V = (long)Aver * VRef / 1024;
-
-    if ( debug ) {
-      Serial.print(millis());
-      Serial.print(" , timer1=");
-      Serial.print(timer1);
-      Serial.print(" , pos=");
-      Serial.print(pos);
-      Serial.print(", V1= ");
-      Serial.print(tank[0].V);
-      Serial.print(", V2= ");
-      Serial.print(tank[1].V);
-      Serial.println(" mV");
-    }
 
     // display
     ClearDisplay();
@@ -220,21 +179,22 @@ void loop() {
       else if ( tank[0].L < 10 and tank[0].L >= 0)        display.setCursor(WIDTH - 12, 5);
       else if ( tank[0].L < 0 )          display.setCursor(WIDTH - 12 * 2, 5);
 
-      display.print(tank[0].L); Summ += tank[0].L;
+      display.print(tank[0].L); 
+      Summ += tank[0].L;
 
       // percent
       display.setTextSize(1);
       display.setCursor(0, 23);
-      display.print("["); display.print(tank[0].Perc); display.print("%]");
+      display.print(F("[")); display.print(tank[0].Perc); display.print(F("%]"));
     } else {
       tank[0].Perc = 0 ;
       display.setTextSize(1);
-      display.setCursor(WIDTH - 14 * 3, 3);  display.print("Error");
+      display.setCursor(WIDTH - 14 * 3, 3);  display.print(F("Error"));
     }
 
     // map volts to liters
     tank[1].L = CalcMapLiter(1, tank[1].V);
-    if ( tank[1].V >= tankVal[1].Vo[0] and tank[1].V <= tankVal[1].Vo[4] ) {
+    if ( tank[1].L >= -10 and tank[1].L <= tankVal[1].Li[4] + 10 ) {
       // map value to percents
       tank[1].Perc = map(tank[1].L, 0, tankVal[1].Li[4], 0, 100 );
 
@@ -244,17 +204,19 @@ void loop() {
       else if ( tank[1].L < 100 and tank[1].L >= 10)        display.setCursor(WIDTH - 12 * 2, 35);
       else if ( tank[1].L < 10 and tank[1].L >= 0 )        display.setCursor(WIDTH - 12, 35);
       else if ( tank[1].L < 0 )        display.setCursor(WIDTH - 12 * 2, 35);
-      display.print(tank[0].L); Summ += tank[1].L;
+      display.print(tank[1].L); 
+      Summ += tank[1].L;
 
       // percent
       display.setTextSize(1);
       display.setCursor(0, 51);
-      display.print("["); display.print(tank[1].Perc); display.print("%]");
+      display.print(F("[")); display.print(tank[1].Perc); display.print(F("%]"));
     } else {
       tank[1].Perc = 0 ;
       display.setTextSize(1);
-      display.setCursor(WIDTH - 14 * 3, 35);  display.print("Error");
+      display.setCursor(WIDTH - 14 * 3, 35);  display.print(F("Error"));
     }
+    
     // Summary
     display.setTextSize(2);
     if        ( Summ >= 100 )      display.setCursor(WIDTH - 12 * 3, HEIGHT / 3 * 2 - 20);
@@ -263,20 +225,22 @@ void loop() {
     else if ( Summ < 0 )      display.setCursor(WIDTH - 12 * 2, HEIGHT / 3 * 2 - 20);
     display.print(Summ);
 
-    // show debug
+    // show voltages
     display.setTextSize(1);
     display.setCursor(0, HEIGHT / 3 * 2 + 5);
     display.print(tank[0].V); display.print(F(" mV "));
     display.setCursor(0, HEIGHT / 3 * 2 + 15);
     display.print(tank[1].V); display.print(F(" mV "));
     display.setCursor(0, HEIGHT / 3 * 2 + 25);
-    display.print( millis() / 100 ); display.print(F(" s"));
-
+    SysVol = (double) analogRead(Vin3) * VRef * (Rhi+Rlo) / 1024 / Rlo;
+    display.print(SysVol/1000); display.print("."); display.print(SysVol%1000/100); display.print(F(" V"));
+    //display.print(SysVol); display.print(F(" mV"));
+    
     if ( relayState ) {
       // drive arrow, to indicate fuel pump working
       display.drawLine(9, 66, 15, 70, SH110X_WHITE);
       display.drawLine(0, 70, 15, 70, SH110X_WHITE);
-      display.drawLine(9, 52, 15, 70, SH110X_WHITE);
+      display.drawLine(9, 74, 15, 70, SH110X_WHITE);
     }
 
     display.display();
@@ -285,7 +249,7 @@ void loop() {
   // get key state
   for (int i = 0; i < BUTTONS ; i++) {
     if ( button[i].tick() ) {
-        if (button[i].click()) MainMenu();
+      if (button[i].click()) MainMenu();
     }
   } // end buttons
 }
@@ -296,18 +260,18 @@ int ArrayCompare(const int *AFirst, const int *ASecond) {
 }
 
 int CalcMapLiter (int N, int Resistance) {
-  // resistance less [0-1]
-  if (Resistance < tankVal[N].Vo[0])
-    return map(Resistance, tankVal[N].Vo[0], tankVal[N].Vo[1], tankVal[N].Li[0], tankVal[N].Li[1] );
+  // resistance more Vo[4]
+  if (Resistance < tankVal[N].Vo[4])
+    return map(Resistance, tankVal[N].Vo[3], tankVal[N].Vo[4], tankVal[N].Li[3], tankVal[N].Li[4] );
 
   // for resistance in [0-4]
-  for (int i = 0; i < 5 - 1; i++) {
-    if (tankVal[N].Vo[i + 1] > Resistance)
-      return map(Resistance, tankVal[N].Vo[i], tankVal[N].Vo[i + 1], tankVal[N].Li[i], tankVal[N].Li[i + 1] );
+  for (int i = 4; i > 0 ; i--) {
+    if (Resistance < tankVal[N].Vo[i - 1] )
+      return map(Resistance, tankVal[N].Vo[i-1], tankVal[N].Vo[i], tankVal[N].Li[i-1], tankVal[N].Li[i] );
   }
 
-  // resistance more [3-4]
-  return map(Resistance, tankVal[N].Vo[3], tankVal[N].Vo[4], tankVal[N].Li[3], tankVal[N].Li[4] );
+  // resistance less Vo[0]
+  return map(Resistance, tankVal[N].Vo[0], tankVal[N].Vo[1], tankVal[N].Li[0], tankVal[N].Li[1] );
 }
 
 void MainMenu () {
@@ -322,7 +286,7 @@ void MainMenu () {
     for ( byte i = 0; i < 4; i++) {
       display.setCursor(0, i * 10 + 5);
       if ( i == pos ) display.setTextColor(SH110X_BLACK, SH110X_WHITE);
-        else         display.setTextColor(SH110X_WHITE);
+        else          display.setTextColor(SH110X_WHITE);
       display.println(MItem[i]);
     }
     display.display();
@@ -330,22 +294,14 @@ void MainMenu () {
     // buttons
     for (int i = 0; i < BUTTONS ; i++) {
       if ( button[i].tick() ) {
-        if (button[0].click()) {
-          if (pos > 0)        {
-            pos--;
-          }
+        if (button[0].click()) { 
+          if (pos > 0)        {  pos--; }
         }
         if (button[1].click()) {
-          if (pos < MaxPos - 1) {
-            pos++;
-          }
+          if (pos < MaxPos - 1) { pos++;  }
         }
-        if (button[0].hold() and (pos > 2) )         {
-          pos = pos - 2;
-        }
-        if (button[1].hold() and (pos < MaxPos - 3))   {
-          pos = pos + 2;
-        }
+        if (button[0].hold() and (pos > 2) )          {  pos = pos - 2; }
+        if (button[1].hold() and (pos < MaxPos - 3))   { pos = pos + 2; }
         if (button[2].click()) {
           switch (pos) {
             case 0:
@@ -379,7 +335,7 @@ void TankCalibMenu (int tankNumber) {
     // menu
     display.setTextSize(1);
     display.setCursor(0, 5);
-    display.print("> Tank "); display.print(tankNumber + 1);
+    display.print(F("> Tank ")); display.print(tankNumber + 1);
 
     for ( byte i = 0; i < 5; i++) {
       display.setCursor(0, i * 10 + 15);
@@ -407,30 +363,18 @@ void TankCalibMenu (int tankNumber) {
     for (int i = 0; i < BUTTONS ; i++) {
       if ( button[i].tick() ) {
         if (button[0].click()) {
-          if (posit > 0)        {
-            posit--;
-            cur = posit / 2;
-          }
+          if (posit > 0)        {  posit--; cur = posit / 2;   }
         }
         if (button[1].click()) {
-          if (posit < MaxPos - 1) {
-            posit++;
-            cur = posit / 2;
-          }
-        }
-        if (button[0].hold() and (posit > 2) )         {
-          posit = posit - 2;
-        }
-        if (button[1].hold() and (posit < MaxPos - 3))   {
-          posit = posit + 2;
+          if (posit < MaxPos - 1) { posit++;  cur = posit / 2;  }
         }
         if (button[2].click()) {
           if  ( posit < 10) {
             if ( posit % 2 == 0 ) {
-              tankVal[tankNumber].Li[cur] = SetValueMenu(tankNumber, "Values", "Liters", tankVal[tankNumber].Li[cur]);
+              tankVal[tankNumber].Li[cur] = SetValueMenu(tankNumber, "Liters", tankVal[tankNumber].Li[cur]);
             }
             else                  {
-              SetVoltageMenu(tankNumber, cur, "Voltage.", "mV", tankVal[tankNumber].Vo[cur] );
+              SetVoltageMenu(tankNumber, cur, "mV", tankVal[tankNumber].Vo[cur] );
             }
           } else if ( posit == 10 ) {
             return;
@@ -441,7 +385,7 @@ void TankCalibMenu (int tankNumber) {
   } /// end while;
 }
 
-int SetValueMenu (int tankN, String Label, String Value, int defValue) {
+int SetValueMenu (int tankN, String Value, int defValue) {
   int MaxPos = 5000;
 
   while ( true ) {
@@ -453,7 +397,7 @@ int SetValueMenu (int tankN, String Label, String Value, int defValue) {
     display.print(F("> Tank ")); display.print(tankN + 1);
 
     display.setCursor(0, 15);
-    display.print(">> "); display.print(Label);
+    display.print(F(">> "));
 
     display.setTextColor(SH110X_BLACK, SH110X_WHITE);
     display.setCursor(0, 25);
@@ -468,21 +412,11 @@ int SetValueMenu (int tankN, String Label, String Value, int defValue) {
     // buttons
     for (int i = 0; i < BUTTONS ; i++) {
       if ( button[i].tick() ) {
-        if ( button[0].click() and (defValue > 0) )       {
-          defValue--;
-        }
-        if ( button[0].hold()  and (defValue > 2) )       {
-          defValue = defValue - 2;
-        }
-        if ( button[1].click() and (defValue < MaxPos - 1)) {
-          defValue++;
-        }
-        if ( button[1].hold()  and (defValue < MaxPos - 3)) {
-          defValue = defValue + 2;
-        }
-        if ( button[2].click() )                          {
-          return defValue;
-        }
+        if ( button[0].click() and (defValue > 0) )       { defValue--;  }
+        if ( button[0].hold()  and (defValue > 2) )       { defValue = defValue - 2; }
+        if ( button[1].click() and (defValue < MaxPos - 1)) { defValue++;   }
+        if ( button[1].hold()  and (defValue < MaxPos - 3)) { defValue = defValue + 2;  }
+        if ( button[2].click() )                          { return defValue;    }
       }
     } // end buttons
   } /// end while;
@@ -497,12 +431,8 @@ int AutoResistanceMenu(int tankN) {
   unsigned int Av;
 
   for (int c = 0; c < NUM_SAMPLES; c++) {
-    if (tankN == 0 ) {
-      tmp[c] = analogRead(Vin1);
-    }
-    else           {
-      tmp[c] = analogRead(Vin2);
-    }
+    if (tankN == 0 ) { tmp[c] = analogRead(Vin1); }
+    else           {   tmp[c] = analogRead(Vin2); }
   }
 
   timer2 = millis();
@@ -523,12 +453,8 @@ int AutoResistanceMenu(int tankN) {
         count = 0;
       }
 
-      if (tankN == 0 ) {
-        tmp[count] = analogRead(Vin1);
-      }
-      else           {
-        tmp[count] = analogRead(Vin2);
-      }
+      if (tankN == 0 ) {  tmp[count] = analogRead(Vin1);  }
+      else           {    tmp[count] = analogRead(Vin2);  }
 
       for (int c = 0; c < NUM_SAMPLES; c++) {
         display.setCursor(0, 15 + 10 * c);
@@ -566,7 +492,7 @@ int AutoResistanceMenu(int tankN) {
   return out;
 }
 
-int SetVoltageMenu (int tankN, int cur, String Label, String Value, int defValue) {
+int SetVoltageMenu (int tankN, int cur, String Value, int defValue) {
   String MItem[] = {F("Automatic"), F("Manual"), F("Back")};
   byte pos = 0;
   byte MaxPos = 3;
@@ -577,18 +503,15 @@ int SetVoltageMenu (int tankN, int cur, String Label, String Value, int defValue
     display.setTextSize(1);
 
     display.setCursor(0, 5);
-    display.print("> Tank "); display.print(tankN + 1);
+    display.print(F("> Tank ")); display.print(tankN + 1);
 
     display.setCursor(0, 15);
-    display.print(">> "); display.print(Label);
+    display.print(F(">> "));
 
     for ( byte i = 0; i < MaxPos; i++) {
       display.setCursor(0, i * 10 + 25);
-      if ( i == pos ) {
-        display.setTextColor(SH110X_BLACK, SH110X_WHITE);
-      } else {
-        display.setTextColor(SH110X_WHITE);
-      }
+      if ( i == pos ) { display.setTextColor(SH110X_BLACK, SH110X_WHITE);
+      } else {          display.setTextColor(SH110X_WHITE);  }
       display.println(MItem[i]);
     }
 
@@ -613,7 +536,7 @@ int SetVoltageMenu (int tankN, int cur, String Label, String Value, int defValue
               tankVal[tankN].Vo[cur] = AutoResistanceMenu(tankN);
               break;
             case 1:
-              tankVal[tankN].Vo[cur] = SetValueMenu(tankVal[tankN].Li[cur], "Voltage", "mV",  tankVal[tankN].Vo[cur]);
+              tankVal[tankN].Vo[cur] = SetValueMenu(tankVal[tankN].Li[cur], "mV",  tankVal[tankN].Vo[cur]);
               break;
             case 2:
               return;
@@ -631,7 +554,9 @@ void ClearDisplay () {
   display.drawLine(0,        0, WIDTH - 1, 0,        SH110X_WHITE);
   if ( debug_osd ) {
     display.setCursor(0, HEIGHT - 8);
-    display.print(memoryFree()); display.print(F(" b"));
+    display.print(memoryFree()); display.print(F("b "));
+    // uptime
+    display.print(  millis()/1000 );
   } else {
     display.drawLine(0, HEIGHT - 1, WIDTH - 1, HEIGHT - 1, SH110X_WHITE);
   }
@@ -639,7 +564,7 @@ void ClearDisplay () {
 
 extern int __bss_end;
 extern void *__brkval;
-// Функция, возвращающая количество свободного ОЗУ
+// Calculate free Ram used by variables function
 int memoryFree() {
   int freeValue;
   if ((int)__brkval == 0)
